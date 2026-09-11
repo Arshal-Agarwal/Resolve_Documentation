@@ -16,7 +16,7 @@ Per Task 4's own flagged ambiguity ("agree in Task 0 whether Auth owns that one 
 - **Authentication Service has zero direct database access to `users`.** It calls two internal, service-to-service-only endpoints on User & Team Service instead:
   - `POST /internal/v1/users/{id}/verify-credentials`
   - `PATCH /internal/v1/users/{id}/password-hash`
-- Authentication also needs an email/tenant → user-id lookup before it can call `verify-credentials`. This document assumes User & Team Service additionally exposes `GET /internal/v1/users/lookup` for that purpose (see §4.1) — confirm this in your Task 0 freeze if not already agreed.
+- Authentication also needs an email/tenant → user-id lookup before it can call `verify-credentials`. User & Team Service exposes `GET /internal/v1/users/lookup` for that purpose (see §14.1) — it takes an already-resolved `organizationId`, **not** a slug. Slug resolution is Organization Service's job (§14.0): Authentication resolves `organizationSlug` → `organizationId` via `GET /internal/v1/organizations/by-slug/{slug}` **before** calling User & Team, so tenant-slug resolution and suspended-tenant rejection live in the one service that owns `organizations`, not duplicated inside User & Team.
 
 This keeps every contract below internally consistent with the rest of the documented architecture.
 
@@ -160,7 +160,7 @@ Intentionally identical whether the email doesn't exist, the tenant slug is wron
   }
 }
 ```
-Distinct from invalid-credentials because the credentials *were* correct — this is a legitimate, different failure mode a disabled user should be told about, per `users.status = 'DISABLED'` in the schema.
+Distinct from invalid-credentials because the credentials *were* correct — this is a legitimate, different failure mode a disabled user should be told about, per `users.status IN ('INACTIVE','SUSPENDED')` in the schema (User & Team Service's canonical enum — see `Contracts/User_Team_Service.md` §5). Either non-`ACTIVE` value maps to this same `403`.
 
 ### Response `202 Accepted` (MFA-enrolled account — see §9)
 ```json
@@ -172,11 +172,12 @@ Distinct from invalid-credentials because the credentials *were* correct — thi
 ```
 
 ### Implementation Notes
-- **Step 1:** call `GET /internal/v1/users/lookup?organizationSlug={slug}&email={email}` on User & Team Service → returns `{ userId, status }` or `404`.
-- **Step 2:** if found and `status = ACTIVE`, call `POST /internal/v1/users/{userId}/verify-credentials` (§14.1).
-- **Step 3:** on `valid: true`, if the user has MFA enrolled (tracked in Redis or via a flag returned by User Service — decide in Task 0), return the `202` MFA-challenge response instead of tokens directly.
-- **Step 4:** otherwise, issue `accessToken` (signed JWT, §3 shape) and `refreshToken` (random UUID, stored as `refresh:{refreshTokenId}` → `{ userId, tenantId, issuedAt, expiresAt }` in Redis).
-- Apply rate limiting here (§2) before Step 1, so a brute-force attempt against a nonexistent email still consumes rate-limit budget rather than skipping straight to a cheap `404`-style short-circuit (which would itself leak information via timing).
+- **Step 1:** resolve the tenant — call `GET /internal/v1/organizations/by-slug/{organizationSlug}` on Organization Service (§14.0) → returns `{ id, status }` or `404`. If `status = SUSPENDED`, reject the login immediately (generic `AUTH_INVALID_CREDENTIALS`, same anti-enumeration principle as below — a suspended tenant should not be distinguishable from a bad password).
+- **Step 2:** call `GET /internal/v1/users/lookup?organizationId={id}&email={email}` on User & Team Service (§14.1) → returns `{ userId, status }` or `404`.
+- **Step 3:** if found and `status = ACTIVE`, call `POST /internal/v1/users/{userId}/verify-credentials` (§14.2).
+- **Step 4:** on `valid: true`, if the user has MFA enrolled (tracked in Redis or via a flag returned by User Service — decide in Task 0), return the `202` MFA-challenge response instead of tokens directly.
+- **Step 5:** otherwise, issue `accessToken` (signed JWT, §3 shape) and `refreshToken` (random UUID, stored as `refresh:{refreshTokenId}` → `{ userId, tenantId, issuedAt, expiresAt }` in Redis).
+- Apply rate limiting here (§2) before Step 1, so a brute-force attempt against a nonexistent email/tenant still consumes rate-limit budget rather than skipping straight to a cheap `404`-style short-circuit (which would itself leak information via timing).
 
 ---
 
@@ -377,18 +378,27 @@ Standard JWKS format (RFC 7517). Every service fetches and caches this; a `kid` 
 
 ---
 
-## 14. Outbound Contracts — Endpoints This Service Calls on User & Team Service
+## 14. Outbound Contracts — Endpoints This Service Calls
 
-These are owned/documented by User & Team Service, listed here because Authentication's own behavior is meaningless without them.
+These are owned/documented by Organization Service and User & Team Service respectively, listed here because Authentication's own behavior is meaningless without them.
 
-### 14.1 `GET /internal/v1/users/lookup?organizationSlug={slug}&email={email}`
+### 14.0 `GET /internal/v1/organizations/by-slug/{slug}` — Organization Service
+**Response `200 OK`**
+```json
+{ "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "name": "Acme Bank", "slug": "acme-bank", "status": "ACTIVE" }
+```
+**Response `404`** if no organization has that slug — Authentication maps this to the same generic `AUTH_INVALID_CREDENTIALS` shown to the client (§5), never a distinguishable 404. A `200` with `status: "SUSPENDED"` is treated the same way (login rejected, generic message) — see §5's Step 1.
+
+This is the **only** place `organizationSlug` gets resolved. Neither Authentication nor User & Team Service resolves a slug itself past this point — everything downstream uses the resolved `organizationId`.
+
+### 14.1 `GET /internal/v1/users/lookup?organizationId={id}&email={email}` — User & Team Service
 **Response `200 OK`**
 ```json
 { "userId": "9e1071ea-...", "status": "ACTIVE" }
 ```
 **Response `404`** if no matching user in that tenant — Authentication maps this to the same generic `AUTH_INVALID_CREDENTIALS` shown to the client (§5), never a distinguishable 404.
 
-### 14.2 `POST /internal/v1/users/{id}/verify-credentials`
+### 14.2 `POST /internal/v1/users/{id}/verify-credentials` — User & Team Service
 **Request**
 ```json
 { "plaintextPassword": "TempPass!2026" }
@@ -397,9 +407,9 @@ These are owned/documented by User & Team Service, listed here because Authentic
 ```json
 { "valid": true, "status": "ACTIVE", "organizationId": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
 ```
-`valid: false` (not an error status) lets Authentication decide the exact client-facing response itself.
+`valid: false` (not an error status) lets Authentication decide the exact client-facing response itself. **`passwordHash` is never returned by this or any other User & Team endpoint, public or internal** — this is the one supported way Authentication verifies a password, and it never sees the hash itself.
 
-### 14.3 `PATCH /internal/v1/users/{id}/password-hash`
+### 14.3 `PATCH /internal/v1/users/{id}/password-hash` — User & Team Service
 **Request**
 ```json
 { "newPlaintextPassword": "NewPass!2027" }

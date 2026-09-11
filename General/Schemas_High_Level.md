@@ -95,11 +95,11 @@ Authenticatable identities, always scoped to exactly one organization (FR-IAM-01
 |---|---|---|---|
 | `id` | UUID | PK | User identifier. |
 | `organization_id` | UUID | FK → `organizations.id`, NOT NULL | A user belongs to exactly one tenant. |
-| `email` | VARCHAR(255) | NOT NULL | Login identifier. |
-| `username` | VARCHAR(100) | NULL | Optional separate login handle, if the tenant prefers username over email login. |
-| `password_hash` | VARCHAR(255) | NOT NULL | bcrypt/argon2 hash — plaintext is never stored (FR-IAM-05). |
-| `full_name` | VARCHAR(255) | NULL | Display name. |
-| `status` | VARCHAR(20) | NOT NULL, DEFAULT `'ACTIVE'`, CHECK IN (`ACTIVE`,`DISABLED`) | A `DISABLED` user fails authentication. |
+| `email` | VARCHAR(255) | NOT NULL, UNIQUE per organization | Login identifier. |
+| `username` | VARCHAR(100) | NOT NULL, UNIQUE per organization | Human-friendly display handle. |
+| `password_hash` | VARCHAR(255) | NULL | bcrypt/argon2 hash — plaintext is never stored (FR-IAM-05). Nullable because a user may be provisioned before Authentication has ever set a credential for them; written exclusively by Authentication via User & Team Service's internal password-hash endpoint (`Contracts/User_Team_Service.md` §3.12), never directly. |
+| `full_name` | VARCHAR(255) | NOT NULL | Display name. |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT `'ACTIVE'`, CHECK IN (`ACTIVE`,`INACTIVE`,`SUSPENDED`) | Any non-`ACTIVE` value fails authentication (`AUTH_ACCOUNT_DISABLED`). Canonicalized to match `Contracts/User_Team_Service.md` §5 and `Schemas/02_User_Team_Service_Schema.md` §5 — an earlier draft of this table used a two-value `ACTIVE`/`DISABLED` enum; that value set is superseded. |
 | `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT now() | — |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, DEFAULT now() | — |
 | *(unique)* | — | UNIQUE(`organization_id`, `email`) | Email is unique within a tenant, not globally. |

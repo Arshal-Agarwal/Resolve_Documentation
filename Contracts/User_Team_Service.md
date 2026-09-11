@@ -519,30 +519,26 @@ Updates a user's profile fields, including status changes (`FR-ORG-02`).
 
 ---
 
-### 3.9 `GET /internal/v1/users/by-email` — service-to-service lookup by email
-**Why:** the frozen Organization Service contract explicitly names this endpoint already in use — `Authentication`'s `POST /api/v1/auth/login` calls `GET /internal/v1/users/by-email?email=&organizationSlug=` to resolve credentials at login time. This is documented here because it's a real, already-relied-upon contract surface for this service, even though it was only ever mentioned as a side note in another service's document — it belongs formally in this service's own contract.
+### 3.9 `GET /internal/v1/users/lookup` — service-to-service lookup by email, within a resolved tenant
+**Why:** Authentication's `POST /api/v1/auth/login` needs to turn an `(organizationId, email)` pair into a `userId` + `status` before it can call §3.11's credential-verification endpoint. **`passwordHash` is never returned by this service, on any endpoint, public or internal** — see §3.11 for why the hash never has to leave this service at all. Tenant-slug resolution belongs to Organization Service, not here: this endpoint takes an already-resolved `organizationId`, never a slug (closing the coupling `Contracts/Organisation_Service.md` §3.4 flags — Authentication calls `GET /internal/v1/organizations/by-slug/{slug}` on Organization Service first, and only passes this service the resolved id).
 
 **Auth:** service identity (mTLS/service JWT).
 
-**Request:** `?email=jane.doe@resolve.com&organizationSlug=acme-bank`
+**Request:** `?organizationId=3fa85f64-5717-4562-b3fc-2c963f66afa6&email=jane.doe@resolve.com`
 
 **200 OK**
 ```json
 {
-  "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-  "organizationId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "email": "jane.doe@resolve.com",
-  "username": "jane.doe",
-  "status": "ACTIVE",
-  "passwordHash": "$2b$12$..."
+  "userId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "status": "ACTIVE"
 }
 ```
-Note: `passwordHash` is only ever returned on this **internal** endpoint, never on any public endpoint — this is the one deliberate exception to §2's "never returned" rule, and exists solely so Authentication can perform credential verification without owning the `users` table itself.
 
 **404 Not Found**
 ```json
-{ "status": 404, "code": "USER_NOT_FOUND", "message": "User not found", "path": "/internal/v1/users/by-email" }
+{ "status": 404, "code": "USER_NOT_FOUND", "message": "User not found", "path": "/internal/v1/users/lookup" }
 ```
+Authentication maps this to the same generic `AUTH_INVALID_CREDENTIALS` shown to the client, never a distinguishable 404 (prevents user enumeration).
 
 ---
 
@@ -563,6 +559,51 @@ Note: `passwordHash` is only ever returned on this **internal** endpoint, never 
 
 ---
 
+### 3.11 `POST /internal/v1/users/{id}/verify-credentials` — service-to-service credential check
+**Why:** `password_hash` physically lives in this service's `users` table (§5's shared-table note), but Authentication owns credential logic. Rather than exposing the hash to Authentication at all — which would mean two services independently implementing hash comparison, and a hash value crossing a network boundary — this service accepts a plaintext password over the (mTLS-protected, internal-only) network and does the comparison itself, returning only a boolean.
+
+**Auth:** service identity (mTLS/service JWT).
+
+**Request**
+```json
+{ "plaintextPassword": "TempPass!2026" }
+```
+
+**200 OK**
+```json
+{ "valid": true, "status": "ACTIVE", "organizationId": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+```
+`valid: false` is a normal `200`, not an error — it lets Authentication decide the client-facing response shape (generic `AUTH_INVALID_CREDENTIALS`) itself, rather than this service leaking a distinction between "wrong password" and any other failure mode.
+
+**404 Not Found**
+```json
+{ "status": 404, "code": "USER_NOT_FOUND", "message": "User not found", "path": "/internal/v1/users/{id}/verify-credentials" }
+```
+
+**Security requirements:** never log the plaintext password; never return `passwordHash` under any circumstance, on this or any other endpoint; use a constant-time/safe comparison via the chosen password-hashing library (bcrypt/Argon2id).
+
+---
+
+### 3.12 `PATCH /internal/v1/users/{id}/password-hash` — service-to-service password update
+**Why:** symmetric with §3.11 — Authentication needs to set a new password (initial set, password-reset confirm) without ever computing or holding a hash itself, since this service is the sole writer of its own `users` table (§5).
+
+**Auth:** service identity (mTLS/service JWT).
+
+**Request**
+```json
+{ "newPlaintextPassword": "NewPass!2027" }
+```
+The field name is intentionally explicit that this is plaintext in transit (over mTLS, internal-only) — this service hashes it before writing.
+
+**204 No Content** — `password_hash` updated, `updated_at` bumped. Never returns the new hash.
+
+**404 Not Found**
+```json
+{ "status": 404, "code": "USER_NOT_FOUND", "message": "User not found", "path": "/internal/v1/users/{id}/password-hash" }
+```
+
+---
+
 ## 4. Explicitly Out of Scope
 
 Called out so the surface is bounded by decision, not by oversight:
@@ -570,7 +611,7 @@ Called out so the surface is bounded by decision, not by oversight:
 | Not provided | Why |
 |---|---|
 | `DELETE /api/v1/users/{id}` (hard delete) | Users are deactivated via `status: INACTIVE`/`SUSPENDED`, never hard-deleted — consistent with the audit trail requirement (`FR-AUD-*`) that historical actor references must remain resolvable. |
-| Password set/change endpoints on this service | `password_hash`, while physically stored in this service's `users` table, is exclusively written by the Authentication Service — see §5's shared-table note. This service never accepts a password in any request body. |
+| Password set/change on any **public** endpoint | `password_hash` is written only via the internal §3.12 endpoint, callable by Authentication's service identity only — never by an end-user request, and never accepted in any `/api/v1/*` request body. |
 | Self-service signup (unauthenticated `POST /users`) | Mirrors the Organization Service's own exclusion — user provisioning is an administrative action gated on `IAM_USER_MANAGE`, not open registration. |
 | Bulk import/CSV upload of users | No FR describes bulk provisioning; out of scope unless a future requirement adds it. |
 | Nested/hierarchical teams (sub-teams, team-of-teams) | The schema (`teams`, `team_members`) models a flat structure only — no `parent_team_id` column exists. |
@@ -654,7 +695,9 @@ No `version` column on any of the three tables — optimistic locking is scoped 
 | `POST /api/v1/teams/{id}/members` (§3.6, proposed) | `FR-ORG-03` |
 | `GET /api/v1/teams/{id}/members` (§3.7, proposed) | `FR-ORG-03` |
 | `DELETE /api/v1/teams/{id}/members/{userId}` (§3.8, proposed) | `FR-ORG-03` |
-| `GET /internal/v1/users/by-email` (§3.9, proposed — but already relied upon) | `FR-IAM-02` (login), closes the coupling the Organization Service's own §3.4 flags |
+| `GET /internal/v1/users/lookup` (§3.9, proposed — but already relied upon) | `FR-IAM-02` (login), closes the coupling the Organization Service's own §3.4 flags |
 | `GET /internal/v1/users/{id}` (§3.10, proposed) | `FR-ORG-04`, `NFR-SEC-02` |
+| `POST /internal/v1/users/{id}/verify-credentials` (§3.11, proposed — but already relied upon) | `FR-IAM-02`, `FR-IAM-05` (password_hash never leaves this service) |
+| `PATCH /internal/v1/users/{id}/password-hash` (§3.12, proposed — but already relied upon) | `FR-IAM-05`, `FR-IAM-07` (password reset) |
 
 **Compiled from** `Resolve_Documentation/{General/SRS.md, General/Schemas_High_Level.md, tasks.md}` and the frozen Organization Service contract. Section 2 reflects the closest thing to an agreed baseline `tasks.md` provides; Section 3 requires Task 0 sign-off before implementation.

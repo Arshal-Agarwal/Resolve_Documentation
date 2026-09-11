@@ -289,7 +289,7 @@ The SRS models `organizations` as a full CRUD-capable entity with a list-friendl
 ---
 
 ### 3.4 `GET /internal/v1/organizations/by-slug/{slug}` — service-to-service slug resolution
-**Why:** this is the clearest actual gap. Authentication's `POST /api/v1/auth/login` (`Contracts/Task1-4.md` §4) accepts `organizationSlug` and resolves it by calling **User & Team's** `GET /internal/v1/users/by-email?email=&organizationSlug=` — meaning User & Team is silently doing slug→tenant resolution today, even though it doesn't own `organizations`. That's a hidden cross-service coupling the Open Decisions register (§5 of `Contracts/Task1-4.md`) doesn't call out. The clean fix is for Authentication (and/or User & Team) to resolve the slug via the Organization Service directly, and reject login early with a clear error if the tenant is `SUSPENDED` — instead of that check happening nowhere.
+**Why:** originally flagged here as a gap — Authentication's `POST /api/v1/auth/login` accepts `organizationSlug`, and an earlier draft of `Contracts/User_Team_Service.md` had User & Team silently resolving that slug itself, even though it doesn't own `organizations`. **Resolved:** `Contracts/Authentication_Service.md` §14.0 and §5's Implementation Notes now call this endpoint first on every login, rejecting early with a generic (anti-enumeration) failure if the tenant is `SUSPENDED`, and only pass the resolved `organizationId` on to User & Team's `lookup` endpoint (`Contracts/User_Team_Service.md` §3.9). Slug resolution now lives in exactly one place.
 
 **Auth:** service identity (mTLS/service JWT).
 

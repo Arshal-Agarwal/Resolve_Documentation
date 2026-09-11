@@ -617,24 +617,26 @@ and include the version in issued sessions.
 
 # 14. Contract Dependencies
 
-### User & Team Service
+Called in this order on every login (§2.3):
 
-```text
-GET /internal/v1/users/lookup
-POST /internal/v1/users/{id}/verify-credentials
-PATCH /internal/v1/users/{id}/password-hash
-```
-
-### Organization Service
-
-Recommended authoritative dependency:
+### 1. Organization Service — resolve tenant first
 
 ```text
 GET /internal/v1/organizations/by-slug/{slug}
 GET /internal/v1/organizations/{id}
 ```
 
-This removes the current hidden coupling where User & Team Service would otherwise resolve an organization slug it does not own.
+Resolves `organizationSlug` → `organizationId`, and rejects early if the tenant is `SUSPENDED`. This removes the hidden coupling where User & Team Service would otherwise resolve a slug it does not own — User & Team's `lookup` endpoint below takes the already-resolved `organizationId`, never a slug.
+
+### 2. User & Team Service — resolve user, then verify/update credentials
+
+```text
+GET /internal/v1/users/lookup?organizationId={id}&email={email}
+POST /internal/v1/users/{id}/verify-credentials
+PATCH /internal/v1/users/{id}/password-hash
+```
+
+`passwordHash` is never returned by any User & Team endpoint, public or internal — verification and hashing both happen inside User & Team Service; Authentication only ever sends/receives plaintext-in, boolean-or-204-out.
 
 ---
 

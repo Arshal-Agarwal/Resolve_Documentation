@@ -576,18 +576,11 @@ GET /internal/v1/users/lookup
 Parameters:
 
 ```text
-organizationSlug
-email
-```
-
-Recommended final version should instead receive an already-resolved:
-
-```text
 organizationId
 email
 ```
 
-because Organization Service owns slug resolution.
+Takes an already-**resolved** `organizationId`, never a slug — Organization Service owns slug resolution (`GET /internal/v1/organizations/by-slug/{slug}`), and Authentication calls that first. This service never resolves a slug itself.
 
 Response:
 
