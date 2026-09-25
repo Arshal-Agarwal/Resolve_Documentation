@@ -31,7 +31,7 @@ This keeps every contract below internally consistent with the rest of the docum
 | Tenant scoping | Never accepted as a body/query field for authorization purposes; always derived server-side |
 | Idempotency | State-changing POSTs that aren't naturally idempotent accept `Idempotency-Key` (see per-endpoint notes — login/refresh are naturally safe to retry and don't require it) |
 | Error shape | `{ "error": { "code", "message", "details", "requestId", "traceId" } }` |
-| Rate limiting | `POST /auth/login` and `POST /auth/password-reset/request` are the two highest-value brute-force targets in the whole platform — apply Redis-backed rate limiting here first (FR-RED-02), even before it's rolled out elsewhere. Recommended: `ratelimit:login:{email}:{window}` and `ratelimit:login:{ip}:{window}`, both checked. |
+| Rate limiting | `POST /auth/login` and `POST /auth/password-reset/request` are the two highest-value brute-force targets in the whole platform — apply Redis-backed rate limiting here first (FR-RED-02), even before it's rolled out elsewhere. **Mandatory, not optional** — `Schemas/01_Authentication_Service_Schema.md` §13 item 7 states rate limiting "is mandatory for login and reset endpoints" (this contract previously downgraded it to "recommended... flag as a team decision" in §15's key table; that was inconsistent with the schema doc and has been corrected). Keys: `resolve:auth:ratelimit:login:email:{normalizedEmail}:{window}` and `resolve:auth:ratelimit:login:ip:{ip}:{window}`, both checked independently (see §15). **Gap:** no equivalent key pattern is documented yet for `/auth/password-reset/request` specifically — the schema doc mandates rate limiting there too, but no key name has been assigned. The built Authentication Service currently only rate-limits `/auth/login`; `/auth/password-reset/request` has no rate limiting yet — this is a known, currently-unaddressed gap between the schema doc's requirement and the implementation. |
 
 ---
 
@@ -160,7 +160,7 @@ Intentionally identical whether the email doesn't exist, the tenant slug is wron
   }
 }
 ```
-Distinct from invalid-credentials because the credentials *were* correct — this is a legitimate, different failure mode a disabled user should be told about, per `users.status IN ('INACTIVE','SUSPENDED')` in the schema (User & Team Service's canonical enum — see `Contracts/User_Team_Service.md` §5). Either non-`ACTIVE` value maps to this same `403`.
+Distinct from invalid-credentials because the credentials *were* correct — this is a legitimate, different failure mode a disabled user should be told about, per `users.status IN ('INACTIVE','SUSPENDED')` in the schema (User & Team Service's canonical enum — see `Contracts/User_Team_Service.md` §5). Either non-`ACTIVE` value maps to this same `403`. **This requires credentials to have actually been checked first — see the resolved Step 3 below; this response can only be reached via a `valid: true` result from `verify-credentials`, never as a shortcut based on the earlier lookup's status.**
 
 ### Response `202 Accepted` (MFA-enrolled account — see §9)
 ```json
@@ -170,13 +170,14 @@ Distinct from invalid-credentials because the credentials *were* correct — thi
   "expiresIn": 300
 }
 ```
+**Not yet implementable — see Step 4 below.** The flag this response depends on doesn't exist in any documented contract yet.
 
 ### Implementation Notes
 - **Step 1:** resolve the tenant — call `GET /internal/v1/organizations/by-slug/{organizationSlug}` on Organization Service (§14.0) → returns `{ id, status }` or `404`. If `status = SUSPENDED`, reject the login immediately (generic `AUTH_INVALID_CREDENTIALS`, same anti-enumeration principle as below — a suspended tenant should not be distinguishable from a bad password).
-- **Step 2:** call `GET /internal/v1/users/lookup?organizationId={id}&email={email}` on User & Team Service (§14.1) → returns `{ userId, status }` or `404`.
-- **Step 3:** if found and `status = ACTIVE`, call `POST /internal/v1/users/{userId}/verify-credentials` (§14.2).
-- **Step 4:** on `valid: true`, if the user has MFA enrolled (tracked in Redis or via a flag returned by User Service — decide in Task 0), return the `202` MFA-challenge response instead of tokens directly.
-- **Step 5:** otherwise, issue `accessToken` (signed JWT, §3 shape) and `refreshToken` (random UUID, stored as `refresh:{refreshTokenId}` → `{ userId, tenantId, issuedAt, expiresAt }` in Redis).
+- **Step 2:** call `GET /internal/v1/users/lookup?organizationId={id}&email={email}` on User & Team Service (§14.1) → returns `{ userId, status }` or `404`. A `404` here maps to the same generic `AUTH_INVALID_CREDENTIALS` — never a distinguishable error (anti-enumeration).
+- **Step 3 (resolved — previously ambiguous):** once a user is found by lookup, **always** call `POST /internal/v1/users/{userId}/verify-credentials` (§14.2), regardless of the lookup's `status` field. Do not gate the call to `verify-credentials` on lookup's `status = ACTIVE`, even though that reading was previously implied here — doing so would make the `403 Forbidden` response above unreachable, since that response's own description requires credentials to have been checked first. Instead: use `verify-credentials`' own returned `status` field (not the earlier lookup's) as the single source of truth for ACTIVE vs. disabled. This is the only reading under which both response descriptions in this section are simultaneously true, and it's what the built Authentication Service implements (see `src/services/authService.js`'s inline rationale).
+- **Step 4 — MFA branch, NOT YET DEFINED:** on `valid: true` with `status = ACTIVE`, this service should check whether the user has MFA enrolled and return the `202` challenge response instead of tokens if so. **How that flag is determined has never been decided** — candidate approaches, none chosen: (a) User & Team Service's `verify-credentials`/`lookup` response gains an `mfaEnabled` boolean field; (b) RBAC Service or Authentication itself owns a small `user_mfa_enrollment` lookup; (c) the flag lives in Redis, written whenever `/auth/mfa/enroll/confirm` (§9, Phase 4) succeeds, and is checked here. **The built Authentication Service does not implement this branch at all** — it always falls through to Step 5 — because MFA is Phase 4 (Could-have) and guessing at an undocumented cross-service data source would mean inventing behavior no other service has agreed to.
+- **Step 5:** on `valid: true` with `status = ACTIVE` (and, once Step 4 is resolved, no MFA challenge required), issue `accessToken` (signed JWT, §3 shape) and `refreshToken` (random UUID, stored as `resolve:auth:refresh:{refreshTokenId}` → `{ userId, tenantId, issuedAt, expiresAt }` in Redis — see §15 for the naming convention).
 - Apply rate limiting here (§2) before Step 1, so a brute-force attempt against a nonexistent email/tenant still consumes rate-limit budget rather than skipping straight to a cheap `404`-style short-circuit (which would itself leak information via timing).
 
 ---
@@ -251,7 +252,9 @@ Standard shape, `code: "AUTH_INVALID_TOKEN"` — logging out with an already-inv
 ```json
 { "message": "If an account with that email exists, a reset link has been sent." }
 ```
-**Side effect:** generates a single-use reset token, stores `passwordreset:{resetToken}` → `{ userId, expiresAt }` in Redis (TTL ~30 min), and hands off delivery. Note: this service has no email-sending capability and no Kafka producer per `kafka.md` — delivery must happen via a direct synchronous call to a notification/email capability, which is a gap worth flagging explicitly in Task 0 if Notification Service's design (consumer-only) doesn't already expose a synchronous "send transactional email" endpoint for exactly this case.
+**Side effect:** generates a single-use reset token, stores `resolve:auth:password-reset:{resetToken}` → `{ userId, expiresAt }` in Redis (TTL ~30 min).
+
+> ⚠️ **Known gap, not yet resolved:** this service has no email-sending capability and no Kafka producer per `kafka.md` §32 ("RBAC, Authentication, Organization, User & Team — no Kafka involvement at all") — so token generation/storage works, but nothing currently *delivers* the reset link to the user. Delivery must happen via a direct synchronous call to a notification/email capability, but Notification Service's documented design (`tasks.md` Task 10) is consumer-only — it reacts to Kafka events, it doesn't expose a synchronous "send transactional email" endpoint anywhere in this doc set. **The built Authentication Service implements this exact gap as a deliberately inert, logged stub** (see its `src/services/passwordResetService.js`) rather than guessing at an endpoint shape for a service it has no contract for. This needs a real decision with whoever owns Notification Service before password reset is genuinely usable end-to-end — it is not blocking Auth's own tests, but it is blocking the feature actually working for a real user.
 
 ### `POST /api/v1/auth/password-reset/confirm`
 **Request**
@@ -259,7 +262,9 @@ Standard shape, `code: "AUTH_INVALID_TOKEN"` — logging out with an already-inv
 { "resetToken": "f4e3d2c1-...", "newPassword": "NewPass!2027" }
 ```
 **Response `204 No Content`.**
-**Internal call:** `PATCH /internal/v1/users/{userId}/password-hash` on User & Team Service (§14.2), using the `userId` resolved from `passwordreset:{resetToken}` in Redis. The reset token is deleted from Redis immediately after use (single-use).
+**Internal call:** `PATCH /internal/v1/users/{userId}/password-hash` on User & Team Service (§14.2), using the `userId` resolved from `resolve:auth:password-reset:{resetToken}` in Redis. The reset token is deleted from Redis only *after* that call succeeds — if User & Team Service is briefly unavailable, the token stays valid for a retry rather than being burned on a failed attempt. The reset token is single-use once the password-hash update succeeds.
+
+> ⚠️ **Missing from this contract, but required by `Schemas/01_Authentication_Service_Schema.md` §11–12:** a successful password reset "should invalidate all active refresh sessions for the user" (§11), and §12's edge-case table repeats this as "Password reset succeeds → Invalidate existing sessions." This contract never states that requirement, and **the built Authentication Service does not currently implement it** — confirming a reset only updates the password hash and consumes the reset token; it does not revoke the user's other active refresh sessions or already-issued access tokens. Schema §11 offers two implementation options (a per-user session index, or a per-user session-version counter checked at refresh time) and recommends the session-index approach as simplest. This is a real, currently-open gap between documented requirement and implementation, not a resolved decision.
 
 **Response `400 Bad Request`**
 ```json
@@ -309,7 +314,7 @@ Client renders `otpauthUrl` as a QR code for an authenticator app. Enrollment is
 ## 10. Token TTL Configuration (`FR-IAM-09`, Phase 4 — Could-have)
 
 ### `GET /api/v1/auth/token-settings`
-**Auth:** Org Admin (`ROLE_MANAGE` or a dedicated `AUTH_SETTINGS_MANAGE` permission — confirm with RBAC's permission catalog in Task 0).
+**Auth:** Org Admin (`ROLE_MANAGE` or a dedicated `AUTH_SETTINGS_MANAGE` permission — confirm with RBAC's permission catalog in Task 0). **This endpoint is currently blocked**, not just undecided: no RBAC Service contract exists at all yet (see `Contracts/RBAC_Service.md`, a gap-flag stub), so there's no permission catalog to confirm against. The built Authentication Service has not implemented this endpoint for exactly this reason, rather than guessing at a permission name for a service with no frozen contract.
 **Response `200 OK`**
 ```json
 {
@@ -364,6 +369,7 @@ Standard JWKS format (RFC 7517). Every service fetches and caches this; a `kid` 
 | `AUTH_MFA_CHALLENGE_EXPIRED` | 401 | The `mfaChallengeToken` itself expired (>5 min) — must restart login. |
 | `AUTH_RATE_LIMITED` | 429 | Too many login/reset attempts; `Retry-After` header included. |
 | `AUTH_VALIDATION_ERROR` | 400 | Malformed request body (missing field, bad format). |
+| `DEPENDENCY_UNAVAILABLE` | 503 | **Missing from this catalog until now.** `Schemas/01_Authentication_Service_Schema.md` §12's edge-case table requires "User Service unavailable during login → Return controlled `503`, not invalid credentials" and the same for Organization Service — but no corresponding error code existed anywhere in this document. Added here to close that gap. This must never collapse into `AUTH_INVALID_CREDENTIALS`; a dependency outage is not the same failure mode as a wrong password, and conflating them would make the anti-enumeration property accidentally hide real outages from monitoring. |
 
 ---
 
@@ -420,14 +426,16 @@ This is the **only** place `organizationSlug` gets resolved. Neither Authenticat
 
 ## 15. Redis Keys Owned by This Service
 
+**Naming resolved:** these keys use the hierarchical `resolve:auth:{domain}:{...}` form, matching `Schemas/01_Authentication_Service_Schema.md` §4 exactly (this table previously used shorter names like `refresh:{id}`; that inconsistency between the two "frozen" documents has been reconciled in favor of the hierarchical form, which the built Authentication Service actually implements).
+
 | Key Pattern | Value | TTL | Used By |
 |---|---|---|---|
-| `session:revoked:{tokenId}` | `"1"` | Remaining access-token life | Logout (§7); checked by every service during JWT verification (§3) |
-| `refresh:{refreshTokenId}` | JSON `{ userId, tenantId, issuedAt, expiresAt }` | Refresh-token lifetime | Login (§5), Refresh (§6) |
-| `mfa:otp:{userId}` | Hashed 6-digit code | ~5 min | MFA verify (§9) — matches `Schemas_High_Level.md` §4.1 exactly |
-| `mfachallenge:{mfaChallengeToken}` | `{ userId }` | ~5 min | Binds a login's `202` response to the follow-up `/mfa/verify` call |
-| `passwordreset:{resetToken}` | `{ userId, expiresAt }` | ~30 min | Password reset confirm (§8) |
-| `ratelimit:login:{email}:{window}` / `ratelimit:login:{ip}:{window}` | Integer counter | Matches window | Brute-force protection on `/auth/login` (recommended, not explicitly required by SRS — flag as a team decision) |
+| `resolve:auth:session:revoked:{tokenId}` | `"1"` | Remaining access-token life | Logout (§7); checked by every service during JWT verification (§3) |
+| `resolve:auth:refresh:{refreshTokenId}` | JSON `{ userId, tenantId, issuedAt, expiresAt }` | Refresh-token lifetime | Login (§5), Refresh (§6) |
+| `resolve:auth:mfa:otp:{userId}` | Hashed 6-digit code | ~5 min | MFA verify (§9) — matches `Schemas_High_Level.md` §4.1 exactly |
+| `resolve:auth:mfa:challenge:{mfaChallengeToken}` | `{ userId }` | ~5 min | Binds a login's `202` response to the follow-up `/mfa/verify` call |
+| `resolve:auth:password-reset:{resetToken}` | `{ userId, expiresAt }` | ~30 min | Password reset confirm (§8) |
+| `resolve:auth:ratelimit:login:email:{normalizedEmail}:{window}` / `resolve:auth:ratelimit:login:ip:{ip}:{window}` | Integer counter | Matches window | Brute-force protection on `/auth/login`, checked independently by identity and by source. **Mandatory per Schema §13 item 7**, not merely recommended (this row previously said otherwise — corrected). No equivalent key exists yet for `/auth/password-reset/request`, which the same schema requirement also covers — that's an open gap, not a resolved omission. |
 
 ---
 

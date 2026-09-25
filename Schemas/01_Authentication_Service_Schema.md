@@ -138,7 +138,7 @@ All keys should be namespaced by service:
 resolve:auth:{key}
 ```
 
-The existing contract examples use shorter names such as `refresh:{id}`. The recommended production implementation is:
+This is the naming convention adopted by the built Authentication Service and reflected in `Contracts/Authentication_Service.md` §15:
 
 ```text
 resolve:auth:refresh:{refreshTokenId}
@@ -150,7 +150,7 @@ resolve:auth:ratelimit:login:email:{normalizedEmail}:{window}
 resolve:auth:ratelimit:login:ip:{ip}:{window}
 ```
 
-If the team freezes the shorter names from the contract, keep them consistent across every service and deployment.
+**Resolved:** the Authentication Service (built) uses the longer hierarchical form above — `resolve:auth:{domain}:{...}:{id}` — not the contract's original shorter names. Reasoning: colon-delimited hierarchy is more debuggable via `redis-cli SCAN`/`KEYS` patterns, and splitting the login rate limit by identity (`email`) vs. source (`ip`) matches Contract §2's requirement to check both independently rather than conflating them into one counter. `Contracts/Authentication_Service.md` §15 has been updated to match this table exactly — the two documents no longer disagree. If any other service's contract or implementation assumed the shorter names for anything cross-service-visible, that's worth a quick confirmation, though nothing about Redis keys is cross-service-visible today (Auth is the sole owner and reader/writer of every key in this namespace).
 
 ---
 

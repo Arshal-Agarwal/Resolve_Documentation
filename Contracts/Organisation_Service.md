@@ -7,6 +7,8 @@
 
 > **How this document is organized:** Section 2 is the *frozen* contract — exactly what `Contracts/Task1-4.md` already specifies, reproduced in full with every status code. Section 3 adds endpoints that the SRS/schema/architecture imply are needed but that the frozen contract doesn't yet cover (list, update, internal slug resolution) — each is flagged as a **gap-fill recommendation**, not an already-agreed contract, so your team can ratify or reject them in Task 0. Section 4 documents what's deliberately **not** part of this service, so the surface stays bounded on purpose rather than by omission.
 
+> ⚠️ **Documentation gap:** `Contracts/Task1-4.md`, cited throughout this document as Section 2's frozen source, **does not exist anywhere in this documentation bundle**. If it exists elsewhere on the team's shared drive, Section 2 should be checked against it directly before treating it as settled. If it was never actually written (just referenced as if it had been), Section 2 is really a well-reasoned reconstruction, not a verified reproduction of a ratified document — it's internally consistent and consistent with what `Authentication_Service.md` and `User_Team_Service.md` both depend on (particularly the `by-slug` internal endpoint in §3.4, which the built Authentication Service calls in production), but "internally consistent" and "actually frozen by the team" are not the same claim. Worth a quick check for whether `Task1-4.md` exists somewhere outside this bundle before the next service contract cites it as settled fact.
+
 ---
 
 ## 1. Shared Conventions (apply to every endpoint below)

@@ -6,6 +6,8 @@
 
 > Every feature line keeps its original SRS ID (`FR-…`, `NFR-…`, `BR-…`) so this plan stays traceable back to the SRS and forward into sprint tickets and test cases, per the SRS §9.4 chain: `SRS Requirement → MoSCoW Priority → Feature → Implementation → Test Case`.
 
+> ⚠️ **BUILD-ORDER NOTE (added post-Task-0 pivot):** This document's Phase 0/1 sections (§2, §3 — "Modular monolith skeleton", the Java/Spring Boot/JUnit/Mockito/Flyway toolchain, the single-deployable framing, and the §10 four-developer ownership table) describe the **pre-pivot plan**. The team has since split into **9 independently deployable services**; `tasks.md` (v3) is now authoritative for service topology, task sequencing, and ownership — read it alongside this document, not instead of it. This document's actual **feature catalog and MoSCoW prioritization (the FR-*/NFR-*/BR-* items and their Phase 2/3/4/5 tier assignments) are still the source of truth** for *what* gets built and in what priority order; only the monolith-era framing of *how* it's packaged and *which stack* is used is superseded. Cross-check any FR's phase assignment here against which service now owns it in `tasks.md` before assuming one developer owns everything listed under their name in §10.
+
 ---
 
 ## 1. How Phasing Works

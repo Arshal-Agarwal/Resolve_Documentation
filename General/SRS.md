@@ -8,6 +8,8 @@
 
 > This document reconciles three independently authored SRS drafts. Where drafts disagreed on wording, scope, or detail level, the more precise or more complete version was kept, and gaps in one draft were filled using detail from the other two. Nothing described here as "Should/Could" has been silently promoted to "Must" — priority calls from the original drafts are preserved.
 
+> ⚠️ **ARCHITECTURE NOTE (added post-Task-0 pivot):** This SRS's architecture sections (§0.6, §5.2, and the Phase 0/1 tooling references in `Features_Phases.md`) describe a Java/Spring Boot **modular monolith**. The team has since moved to a **9-service microservices decomposition** (REST + Kafka between independently deployable services) — see `tasks.md` (v3), which is now the authoritative source for service topology, ownership, and build order. This SRS's functional requirements, NFRs, and business rules (`FR-*`, `NFR-*`, `BR-*`) remain valid and are still the requirements baseline; only the *deployment architecture and toolchain* (Java/Spring Boot/JUnit/Mockito/Flyway) are superseded. Individual services may use different stacks per-service (e.g., the Authentication Service is implemented in Node.js/Express, not Java). No ADR formally recording this pivot exists yet in `Architechture_Design_Decisions/` — that's a real gap `tasks.md` Task 12 already flags ("ADR for the monolith→multi-service shift") but nobody has written yet.
+
 ---
 
 ## Document Structure

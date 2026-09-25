@@ -635,7 +635,7 @@ Called out so the surface is bounded by decision, not by oversight:
 | `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT `now()` | — |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, DEFAULT `now()` | — |
 
-**Shared-table note (open decision for Task 0):** `password_hash` lives in this service's table but must be written exclusively by Authentication. Two options to ratify in Task 0: **(a)** Authentication writes directly to this column via a shared database connection (simplest, but blurs table ownership across services), or **(b)** Authentication calls a small internal endpoint on this service (e.g. `PUT /internal/v1/users/{id}/password-hash`) to set it, keeping this service the sole writer of its own table. Option (b) is more consistent with this project's "one table, one owning service" principle and is the recommended default absent a Task 0 objection.
+**Shared-table note (considered resolved by implementation, not yet formally re-ratified by the team):** `password_hash` lives in this service's table but must be written exclusively by Authentication. **§3.12 above already specifies this**: Authentication calls `PATCH /internal/v1/users/{id}/password-hash` on this service to set it, keeping this service the sole writer of its own table (option (b) from the original two candidates — option (a), Authentication writing directly via a shared DB connection, was rejected as inconsistent with this project's "one table, one owning service" principle). *(This note previously described the endpoint as `PUT` and framed it as a still-open example — that was stale text left over from before §3.12 was fully specified; `PATCH` is correct, and it's what the built Authentication Service actually calls today. Worth a quick team confirmation since User & Team Service's own implementation doesn't exist yet to verify against.)*
 
 ### `teams` (from `Schemas_High_Level.md` §2.3)
 
@@ -695,9 +695,11 @@ No `version` column on any of the three tables — optimistic locking is scoped 
 | `POST /api/v1/teams/{id}/members` (§3.6, proposed) | `FR-ORG-03` |
 | `GET /api/v1/teams/{id}/members` (§3.7, proposed) | `FR-ORG-03` |
 | `DELETE /api/v1/teams/{id}/members/{userId}` (§3.8, proposed) | `FR-ORG-03` |
-| `GET /internal/v1/users/lookup` (§3.9, proposed — but already relied upon) | `FR-IAM-02` (login), closes the coupling the Organization Service's own §3.4 flags |
+| `GET /internal/v1/users/lookup` (§3.9, **load-bearing — the built Authentication Service calls this exact shape today**) | `FR-IAM-02` (login), closes the coupling the Organization Service's own §3.4 flags |
 | `GET /internal/v1/users/{id}` (§3.10, proposed) | `FR-ORG-04`, `NFR-SEC-02` |
-| `POST /internal/v1/users/{id}/verify-credentials` (§3.11, proposed — but already relied upon) | `FR-IAM-02`, `FR-IAM-05` (password_hash never leaves this service) |
-| `PATCH /internal/v1/users/{id}/password-hash` (§3.12, proposed — but already relied upon) | `FR-IAM-05`, `FR-IAM-07` (password reset) |
+| `POST /internal/v1/users/{id}/verify-credentials` (§3.11, **load-bearing — the built Authentication Service calls this exact shape today**) | `FR-IAM-02`, `FR-IAM-05` (password_hash never leaves this service) |
+| `PATCH /internal/v1/users/{id}/password-hash` (§3.12, **load-bearing — the built Authentication Service calls this exact shape today**) | `FR-IAM-05`, `FR-IAM-07` (password reset) |
+
+**Note on §3.9/3.11/3.12's status:** these three are no longer just "proposed, but already relied upon" — a real, tested Authentication Service (Phases 0–3 complete) implements HTTP clients against these exact request/response shapes, verified end-to-end against a mock server built to this same contract. Any change to these three endpoints' shapes is now a breaking change for working code, not a paper contract revision. User & Team Service's own implementation doesn't exist yet, so these shapes are unverified from *this* service's side — that's the remaining risk, not the shape itself.
 
 **Compiled from** `Resolve_Documentation/{General/SRS.md, General/Schemas_High_Level.md, tasks.md}` and the frozen Organization Service contract. Section 2 reflects the closest thing to an agreed baseline `tasks.md` provides; Section 3 requires Task 0 sign-off before implementation.

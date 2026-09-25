@@ -43,7 +43,7 @@ Tasks 2–10 are 9 independent, single-service tasks. Suggested sequential build
 ## Task 1 — Shared Infrastructure Setup
 
 **Assign to:** All 4, together (or one infra-lead + reviewers).
-- [ ] Kafka (or Redpanda) via Docker Compose; topic list:
+- [ ] Kafka (or Redpanda) via Docker Compose; topic list (⚠️ **this list is stale — see `Contracts/kafka.md` §1 for the authoritative, current topic/consumer map**, which additionally includes `resolve.document.scanned` and consumers like the Search Indexer, Virus Scanner Worker, OCR Worker, and Metadata Processor that this shorter list omits):
   ```text
   resolve.case.created / .assigned / .statuschanged / .resolved
   resolve.task.created / .completed
@@ -116,6 +116,8 @@ Tasks 2–10 are 9 independent, single-service tasks. Suggested sequential build
 
 **Owner:** ______________________
 **Can build in parallel with Task 4** — roles/permissions don't depend on the login mechanism itself, only on `users` existing (Task 3).
+
+> ⚠️ **No contract exists yet for this service** — see `Contracts/RBAC_Service.md` (a gap-flag stub, not a real contract) for exactly what's undefined and who's currently blocked by it (notably Authentication's token-settings endpoint). Writing the real contract is this task's first deliverable, before any code.
 
 **Interface:** internal permission-check contract other services call (define the exact shape — REST endpoint or embedded library — in Task 0)
 **Owned tables:** `roles`, `permissions`, `user_roles`, `role_permissions`
